@@ -1,0 +1,976 @@
+Create a Next.js 15 SaaS application foundation with these requirements:
+
+PROJECT: Notion-Ayrshare CMS - Multi-tenant social media scheduling platform
+
+TECH STACK:
+- Next.js 15 (App Router)
+- TypeScript 5.x
+- Tailwind CSS
+- Clerk authentication
+- Supabase PostgreSQL
+- shadcn/ui components
+
+INITIAL STRUCTURE:
+1. Setup Next.js with TypeScript and App Router
+2. Configure Tailwind with custom theme (primary: blue-600, secondary: slate-700)
+3. Install and configure Clerk for authentication
+4. Setup Supabase client (browser and server-side)
+5. Create middleware.ts for Clerk route protection
+
+FILE STRUCTURE:
+/app
+  /(auth)/sign-in/[[...sign-in]]/page.tsx
+  /(auth)/sign-up/[[...sign-up]]/page.tsx
+  /(marketing)/page.tsx - Landing page with hero, features, CTA
+  /(dashboard)/dashboard/page.tsx - Protected dashboard home
+  /api/webhooks/clerk/route.ts
+  /api/health/route.ts
+  layout.tsx
+  globals.css
+
+/components
+  /ui (button, card, input, dialog - shadcn style)
+  /layouts/dashboard-shell.tsx
+  /layouts/sidebar.tsx
+
+/lib
+  /db/client.ts - Supabase setup
+  /auth/clerk.ts - Clerk utilities
+  /utils/cn.ts - Class name merger
+
+ENVIRONMENT VARIABLES NEEDED:
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+CLERK_SECRET_KEY
+NEXT_PUBLIC_SUPABASE_URL
+NEXT_PUBLIC_SUPABASE_ANON_KEY
+
+SPECIFIC REQUIREMENTS:
+- Landing page: Dark mode, gradient hero, 3 feature cards, pricing CTA
+- Dashboard shell: Sidebar with navigation (Dashboard, Content, Scheduled, Analytics, Teams, Settings)
+- Responsive mobile nav with hamburger menu
+- Protected routes require Clerk authentication
+- Clerk webhook syncs user to Supabase users table
+
+DELIVERABLES:
+- Fully configured Next.js project
+- Working auth flow (sign up → dashboard)
+- Responsive layouts for all viewports
+- Type-safe Supabase client
+- Health check endpoint at /api/health
+
+Start with package.json, then create all files systematically. Use modern React patterns (Server Components by default, Client Components only when needed).
+```
+
+---
+
+## Prompt 2: Database Schema & RLS Policies
+```
+Create complete Supabase database schema with Row-Level Security for a multi-tenant SaaS CMS:
+
+CONTEXT: Social media scheduling platform where users belong to teams, teams have content, content gets scheduled to social platforms.
+
+SCHEMA REQUIREMENTS:
+
+1. USERS table:
+- id (uuid, primary key, matches Clerk user ID)
+- email (text, unique)
+- display_name (text)
+- avatar_url (text)
+- metadata (jsonb)
+- created_at, updated_at (timestamptz)
+
+2. TEAMS table:
+- id (uuid, auto-generated)
+- name (text)
+- slug (text, unique)
+- owner_user_id (uuid → users.id)
+- settings (jsonb default {})
+- created_at (timestamptz)
+
+3. TEAM_MEMBERS table:
+- id (uuid)
+- team_id (uuid → teams.id CASCADE)
+- user_id (uuid → users.id CASCADE)
+- role (enum: owner, admin, editor, viewer)
+- created_at
+- UNIQUE constraint on (team_id, user_id)
+- Indexes on team_id and user_id
+
+4. CONTENT table:
+- id (uuid)
+- team_id (uuid → teams.id CASCADE)
+- notion_page_id (text, unique, nullable)
+- title (text)
+- body (jsonb)
+- status (enum: draft, scheduled, published, archived)
+- metadata (jsonb default {})
+- last_synced_at (timestamptz, nullable)
+- created_by (uuid → users.id)
+- created_at, updated_at
+
+5. SCHEDULED_POSTS table:
+- id (uuid)
+- content_id (uuid → content.id CASCADE)
+- scheduled_for (timestamptz)
+- platforms (jsonb array of strings)
+- status (enum: queued, posting, posted, failed, cancelled)
+- attempt_count (int default 0)
+- payload (jsonb)
+- published_at (timestamptz, nullable)
+- error_message (text, nullable)
+- created_at
+
+6. SOCIAL_ACCOUNTS table:
+- id (uuid)
+- user_id (uuid → users.id CASCADE)
+- provider (text: twitter, linkedin, facebook, instagram)
+- provider_account_id (text)
+- credentials (jsonb, encrypted)
+- profile_name (text)
+- connected_at (timestamptz)
+- status (text default 'active')
+- UNIQUE on (user_id, provider, provider_account_id)
+
+7. ANALYTICS table:
+- id (uuid)
+- content_id (uuid → content.id CASCADE)
+- platform (text)
+- date (date)
+- impressions (int default 0)
+- clicks (int default 0)
+- likes (int default 0)
+- shares (int default 0)
+- comments (int default 0)
+- raw (jsonb)
+- UNIQUE on (content_id, platform, date)
+
+ROW-LEVEL SECURITY POLICIES:
+
+For TEAMS:
+- SELECT: User is a member (via team_members)
+- INSERT: Authenticated users can create
+- UPDATE: User is owner or admin
+- DELETE: User is owner only
+
+For TEAM_MEMBERS:
+- SELECT: User is a member of the team
+- INSERT: User is owner/admin of the team
+- DELETE: User is owner/admin, or deleting themselves
+
+For CONTENT:
+- SELECT: User is team member
+- INSERT: User is editor/admin/owner
+- UPDATE: User is editor/admin/owner
+- DELETE: User is admin/owner
+
+For SCHEDULED_POSTS, SOCIAL_ACCOUNTS, ANALYTICS:
+- Inherit from parent table (content or user)
+
+HELPER FUNCTIONS:
+Create function user_is_team_member(team_id uuid) that checks team_members table.
+Create function user_team_role(team_id uuid) that returns role text.
+
+DELIVERABLES:
+1. Complete SQL migration file (single file, can be run idempotently)
+2. All tables with proper constraints and indexes
+3. All RLS policies enabled and configured
+4. Helper functions for permission checks
+5. Sample data seed script (2 users, 2 teams, 5 content items)
+
+Format as a single migration.sql file with clear comments. Use modern PostgreSQL 15+ features.
+```
+
+---
+
+## Prompt 3: Content Management System
+```
+Build the Content Management feature for the Notion-Ayrshare CMS:
+
+CONTEXT: Users sync content from Notion pages, edit metadata, and schedule posts to social media. This is the core feature.
+
+REQUIREMENTS:
+
+1. CONTENT LIST PAGE (/dashboard/content)
+Server Component that displays:
+- Data table with columns: Title, Status, Last Synced, Platforms, Created
+- Filters: Status (all, draft, scheduled, published), Search by title
+- Actions: Create New, Sync from Notion, Bulk Actions
+- Pagination (50 per page)
+- Empty state with illustration when no content
+
+2. CREATE CONTENT PAGE (/dashboard/content/new)
+Form with:
+- Title (text input, required)
+- Body (textarea or simple rich text, required)
+- Status (select: draft, scheduled)
+- Notion Page ID (optional input for manual sync)
+- Tags (multi-select or comma-separated)
+- Save as Draft / Publish buttons
+
+3. CONTENT DETAIL PAGE (/dashboard/content/[id])
+Display:
+- Full content with formatted body (render JSON blocks as HTML)
+- Metadata sidebar (status, created date, author, last synced)
+- Action buttons: Edit, Sync Now, Schedule Post, Delete
+- Analytics preview (impressions, engagement if published)
+- Audit log (when created, edited, synced, published)
+
+4. EDIT PAGE (/dashboard/content/[id]/edit)
+Same as create form, pre-populated with existing data
+Optimistic updates with loading states
+
+5. API ROUTES:
+
+GET /api/content
+- Query params: teamId, status, search, page, limit
+- Returns paginated content list
+- Filters by current user's team membership
+- Includes related scheduled_posts count
+
+POST /api/content
+- Body: { title, body, status, metadata, notion_page_id? }
+- Validates with Zod schema
+- Creates content record with team_id from session
+- Returns created content with id
+
+GET /api/content/[id]
+- Returns full content with relations (scheduled_posts, analytics summary)
+- Checks RLS via Supabase
+
+PATCH /api/content/[id]
+- Partial updates
+- Validates user has edit permission
+- Updates updated_at timestamp
+
+DELETE /api/content/[id]
+- Soft delete (status = 'archived') or hard delete
+- Checks user is admin/owner
+- Cascades to scheduled_posts
+
+POST /api/content/[id]/sync
+- Triggers manual Notion sync
+- Validates notion_page_id exists
+- Queues background job
+- Returns sync job status
+
+COMPONENTS NEEDED:
+
+/components/content/
+- content-table.tsx (with sorting, filtering)
+- content-card.tsx (grid view alternative)
+- content-form.tsx (shared between new/edit)
+- content-preview.tsx (modal to preview before publishing)
+- content-status-badge.tsx (color-coded status)
+- notion-block-renderer.tsx (render JSON blocks)
+
+/lib/
+- db/queries/content.ts (type-safe DB queries)
+- utils/validators.ts (Zod schemas for content)
+
+TECHNICAL REQUIREMENTS:
+- Use React Server Components for list/detail pages
+- Use Server Actions for mutations (create, update, delete)
+- Implement optimistic updates on mutations
+- Use Suspense boundaries with loading skeletons
+- Error boundaries for graceful error handling
+- Toast notifications for user feedback
+- Type-safe with TypeScript throughout
+
+DATA FLOW:
+1. User creates content → POST /api/content → Insert to DB → Redirect to detail page
+2. User syncs from Notion → POST /api/content/[id]/sync → Queue job → Update when complete
+3. User schedules post → Opens scheduler modal → POST /api/scheduled-posts → Show in calendar
+
+DELIVERABLES:
+- All pages with full functionality
+- All API routes with validation
+- Reusable components
+- Type definitions
+- Loading and error states
+- Responsive design (mobile-first)
+
+Start with the content table component, then build up to full CRUD.
+```
+
+---
+
+## Prompt 4: Notion Integration
+```
+Implement complete Notion integration for syncing content:
+
+CONTEXT: Users connect their Notion workspace, select databases/pages to sync, and automatically pull content into the CMS. Notion blocks are converted to structured JSON for editing and social media posting.
+
+REQUIREMENTS:
+
+1. NOTION OAUTH FLOW:
+
+/integrations/notion page:
+- "Connect Notion" button
+- Shows connection status if already connected
+- Lists connected databases/pages
+- "Disconnect" option
+
+/api/integrations/notion/authorize route:
+- Generates OAuth URL with state parameter
+- Redirects to Notion authorization
+- Scopes: read_content, read_database
+
+/api/integrations/notion/callback route:
+- Receives OAuth code
+- Exchanges for access token
+- Stores encrypted token in user.metadata or separate notion_connections table
+- Redirects to integrations page with success message
+
+2. NOTION SYNC SERVICE:
+
+/lib/integrations/notion/client.ts:
+```typescript
+export class NotionClient {
+  constructor(accessToken: string)
+  
+  // List user's databases
+  async listDatabases(): Promise<Database[]>
+  
+  // List pages in a database
+  async listPages(databaseId: string): Promise<Page[]>
+  
+  // Get single page with all blocks
+  async getPage(pageId: string): Promise<PageWithBlocks>
+  
+  // Listen for changes (polling or webhook)
+  async setupWebhook(pageId: string): Promise<void>
+}
+```
+
+/lib/integrations/notion/transformer.ts:
+```typescript
+export class NotionBlockTransformer {
+  // Convert Notion blocks to our JSON format
+  transform(blocks: NotionBlock[]): ContentBody
+  
+  // Extract title from page properties
+  extractTitle(page: NotionPage): string
+  
+  // Extract metadata (tags, dates, etc.)
+  extractMetadata(page: NotionPage): Record<string, any>
+  
+  // Generate plain text for social media
+  toPlainText(blocks: ContentBody): string
+  
+  // Generate HTML preview
+  toHTML(blocks: ContentBody): string
+}
+```
+
+3. SYNC LOGIC:
+
+/lib/integrations/notion/sync.ts:
+```typescript
+export async function syncNotionPage(
+  userId: string,
+  teamId: string,
+  notionPageId: string
+): Promise<Content> {
+  // 1. Fetch page from Notion API
+  // 2. Transform blocks to JSON
+  // 3. Upsert to content table
+  // 4. Update last_synced_at
+  // 5. Return content record
+}
+
+export async function syncAllPages(
+  userId: string,
+  teamId: string
+): Promise<SyncResult[]> {
+  // Batch sync all connected pages
+  // Use job queue for large databases
+}
+```
+
+4. WEBHOOK HANDLER:
+
+/api/webhooks/notion route:
+- Receives Notion page update events
+- Verifies webhook signature
+- Queues sync job for changed pages
+- Returns 200 quickly (process async)
+
+5. BACKGROUND JOB:
+
+/lib/jobs/jobs/sync-notion.ts:
+```typescript
+export async function syncNotionJob(job: Job) {
+  const { userId, teamId, notionPageId } = job.data
+  
+  try {
+    await syncNotionPage(userId, teamId, notionPageId)
+    return { success: true }
+  } catch (error) {
+    if (job.attemptsMade < 3) {
+      throw error // Retry
+    }
+    // Log failure, notify user
+    return { success: false, error }
+  }
+}
+```
+
+6. UI COMPONENTS:
+
+/components/integrations/notion-connect-button.tsx:
+- Handles OAuth initiation
+- Shows loading state
+- Displays error messages
+
+/components/integrations/notion-database-picker.tsx:
+- Lists available Notion databases
+- Toggle which databases to sync
+- Shows sync status and last sync time
+
+/components/content/notion-block-renderer.tsx:
+- Renders Notion blocks as HTML
+- Supports: paragraph, heading, list, code, image, embed
+- Maintains Notion styling
+
+NOTION BLOCK TYPES TO SUPPORT:
+- paragraph (with rich text)
+- heading_1, heading_2, heading_3
+- bulleted_list_item, numbered_list_item
+- code (with language)
+- image (with caption)
+- divider
+- quote
+- callout
+
+JSON FORMAT:
+```typescript
+type ContentBody = {
+  blocks: Array<{
+    type: 'paragraph' | 'heading_1' | 'heading_2' | 'heading_3' | 'list' | 'code' | 'image'
+    content: string | RichText[]
+    metadata?: {
+      level?: number
+      language?: string
+      url?: string
+      alt?: string
+    }
+  }>
+}
+```
+
+ERROR HANDLING:
+- Token expiration → Prompt re-authentication
+- Rate limiting → Exponential backoff
+- Invalid page ID → Clear error message
+- Network errors → Retry with job queue
+
+DELIVERABLES:
+1. Complete Notion OAuth flow
+2. Notion API client with all methods
+3. Block transformer with tests
+4. Sync service with upsert logic
+5. Webhook handler
+6. Background job definition
+7. UI components for connection management
+8. Type definitions for Notion API responses
+
+Test with real Notion workspace. Provide sample Notion page structure for testing.
+```
+
+---
+
+## Prompt 5: Social Media Scheduling & Ayrshare
+```
+Build the post scheduling system with Ayrshare integration:
+
+CONTEXT: Users schedule content to post on social media platforms (Twitter, LinkedIn, Facebook, Instagram) at specific times. Ayrshare API handles multi-platform posting.
+
+REQUIREMENTS:
+
+1. POST SCHEDULER UI:
+
+/dashboard/scheduled page:
+- Calendar view (month/week/day)
+- List view of upcoming posts
+- Filters: Platform, Status, Date range
+- Quick schedule button from any content
+
+Schedule Post Modal (triggered from content detail):
+- Date/time picker (with timezone support)
+- Platform multi-select (Twitter, LinkedIn, Facebook, Instagram)
+- Custom message per platform (with character limits)
+- Media attachment (images/videos)
+- Preview for each platform
+- Schedule/Save Draft buttons
+
+2. SCHEDULED POSTS API:
+
+POST /api/scheduled-posts:
+```typescript
+{
+  content_id: string
+  scheduled_for: string // ISO datetime
+  platforms: ['twitter', 'linkedin']
+  customizations?: {
+    twitter?: { text: string, media?: string[] }
+    linkedin?: { text: string, media?: string[] }
+  }
+}
+```
+- Validates scheduled_for is future
+- Checks user has connected social accounts for platforms
+- Creates scheduled_post record
+- Enqueues job for scheduled time
+- Returns created post
+
+GET /api/scheduled-posts:
+- Query params: teamId, status, platform, from, to
+- Returns list with content details
+- Groups by date for calendar view
+
+DELETE /api/scheduled-posts/[id]:
+- Cancels scheduled post
+- Removes job from queue
+- Updates status to 'cancelled'
+
+POST /api/scheduled-posts/[id]/retry:
+- Retry failed post immediately
+- Resets attempt_count
+- Updates status to 'queued'
+
+3. AYRSHARE SERVICE:
+
+/lib/integrations/ayrshare/client.ts:
+```typescript
+export class AyrshareClient {
+  constructor(apiKey: string)
+  
+  async createPost(params: {
+    post: string
+    platforms: string[]
+    mediaUrls?: string[]
+    scheduleDate?: string // ISO datetime
+  }): Promise<AyrshareResponse>
+  
+  async getPostStatus(postId: string): Promise<PostStatus>
+  
+  async deletePost(postId: string): Promise<void>
+  
+  async getAnalytics(postId: string): Promise<PostAnalytics>
+  
+  async validateAccount(platform: string): Promise<boolean>
+}
+```
+
+/lib/integrations/ayrshare/poster.ts:
+```typescript
+export async function publishPost(
+  scheduledPostId: string
+): Promise<PublishResult> {
+  // 1. Get scheduled_post from DB
+  // 2. Get content and customizations
+  // 3. Upload media to Ayrshare (if any)
+  // 4. Call Ayrshare API
+  // 5. Update scheduled_post status
+  // 6. Store Ayrshare post IDs
+  // 7. Return result
+}
+
+export async function formatContentForPlatform(
+  content: Content,
+  platform: string,
+  customization?: CustomPost
+): Promise<string> {
+  // Apply platform-specific formatting
+  // Respect character limits
+  // Add hashtags appropriately
+  // Handle mentions/links
+}
+```
+
+4. BACKGROUND JOB:
+
+/lib/jobs/jobs/publish-post.ts:
+```typescript
+export async function publishPostJob(job: Job) {
+  const { scheduledPostId } = job.data
+  
+  try {
+    const result = await publishPost(scheduledPostId)
+    
+    // Update status to 'posted'
+    await updateScheduledPost(scheduledPostId, {
+      status: 'posted',
+      published_at: new Date(),
+      payload: result
+    })
+    
+    // Schedule analytics fetch for 24h later
+    await scheduleAnalyticsFetch(scheduledPostId, '24h')
+    
+    return result
+  } catch (error) {
+    // Increment attempt_count
+    // Update error_message
+    
+    if (job.attemptsMade < 3) {
+      throw error // Retry with backoff
+    }
+    
+    await updateScheduledPost(scheduledPostId, {
+      status: 'failed',
+      error_message: error.message
+    })
+    
+    // Notify user of failure
+    await sendNotification(scheduledPostId, 'post_failed')
+  }
+}
+```
+
+5. SOCIAL ACCOUNT MANAGEMENT:
+
+/dashboard/integrations/social page:
+- Cards for each platform
+- Connect/Disconnect buttons
+- Account display name
+- Connection status indicator
+- Last used timestamp
+
+/api/social-accounts routes:
+- GET: List connected accounts
+- POST: Initiate OAuth (redirect to Ayrshare)
+- DELETE /[id]: Disconnect account
+
+6. PLATFORM-SPECIFIC FEATURES:
+
+Character Limits:
+- Twitter: 280 characters
+- LinkedIn: 3000 characters
+- Facebook: 63,206 characters
+- Instagram: 2200 characters (caption)
+
+Media Requirements:
+- Twitter: Up to 4 images, 1 video
+- LinkedIn: Up to 9 images, 1 video
+- Facebook: Up to 10 images/videos
+- Instagram: Up to 10 images/videos (carousel)
+
+Hashtag Handling:
+- Twitter: Inline hashtags
+- LinkedIn: End of post
+- Instagram: End of post or first comment
+
+7. UI COMPONENTS:
+
+/components/scheduling/
+- post-scheduler-form.tsx (main modal)
+- platform-selector.tsx (with icons and limits)
+- time-picker.tsx (with timezone)
+- media-uploader.tsx (drag & drop)
+- platform-preview.tsx (show how post looks)
+- scheduled-calendar.tsx (calendar view)
+- scheduled-list.tsx (table view)
+
+8. WEBHOOK HANDLER:
+
+/api/webhooks/ayrshare route:
+- Receives post status updates
+- Verifies signature
+- Updates scheduled_post status
+- Triggers analytics refresh if posted
+- Returns 200 immediately
+
+DELIVERABLES:
+1. Complete scheduling UI with calendar
+2. Ayrshare client with all methods
+3. Post publishing service with retry logic
+4. Background job for timed posting
+5. Social account connection flow
+6. Platform-specific formatters
+7. Character counter for each platform
+8. Media upload and validation
+9. Preview component for all platforms
+10. Webhook handler for status updates
+
+Include comprehensive error handling and user notifications. Test with Ayrshare sandbox API.
+```
+
+---
+
+## Prompt 6: Analytics Dashboard
+```
+Create comprehensive analytics dashboard for social media post performance:
+
+CONTEXT: Track engagement metrics across all platforms, visualize trends, compare post performance, and provide actionable insights.
+
+REQUIREMENTS:
+
+1. ANALYTICS OVERVIEW PAGE (/dashboard/analytics):
+
+Layout:
+- Date range picker (Last 7 days, 30 days, 90 days, Custom)
+- Platform filter (All, Twitter, LinkedIn, Facebook, Instagram)
+- Key metrics cards:
+  * Total Impressions (with % change)
+  * Total Engagement (likes + comments + shares)
+  * Average Engagement Rate
+  * Total Posts Published
+  * Best Performing Platform
+
+Charts:
+- Engagement over time (line chart)
+- Platform comparison (bar chart)
+- Top 5 performing posts (table with thumbnails)
+- Engagement rate by post type (pie chart)
+- Best time to post heatmap (day/hour)
+
+2. POST-SPECIFIC ANALYTICS (/dashboard/analytics/[postId]):
+
+Display:
+- Post content preview
+- Published date and platforms
+- Platform breakdown cards:
+  * Twitter: Impressions, Likes, Retweets, Replies, Profile clicks
+  * LinkedIn: Impressions, Likes, Comments, Shares, Click-through rate
+  * Facebook: Reach, Reactions, Comments, Shares
+  * Instagram: Reach, Likes, Comments, Saves, Profile visits
+
+Timeline:
+- 24-hour performance graph
+- Week 1 vs Week 2 comparison
+- Peak engagement periods
+
+3. API ROUTES:
+
+GET /api/analytics:
+Query params:
+```typescript
+{
+  teamId: string
+  from: string // ISO date
+  to: string // ISO date
+  platform?: string
+  contentId?: string
+}
+```
+Returns:
+```typescript
+{
+  summary: {
+    totalImpressions: number
+    totalClicks: number
+    totalLikes: number
+    totalShares: number
+    totalComments: number
+    engagementRate: number
+    postCount: number
+  }
+  timeSeriesData: Array<{
+    date: string
+    impressions: number
+    engagement: number
+    platform: string
+  }>
+  topPosts: Array<{
+    content_id: string
+    title: string
+    platforms: string[]
+    totalEngagement: number
+    engagementRate: number
+  }>
+  platformBreakdown: Record<string, {
+    impressions: number
+    engagement: number
+    postCount: number
+  }>
+}
+```
+
+GET /api/analytics/[contentId]:
+Returns detailed metrics for single post across all platforms
+
+POST /api/analytics/refresh:
+Triggers analytics fetch from Ayrshare for all published posts
+
+GET /api/analytics/export:
+Returns CSV download of analytics data
+
+4. ANALYTICS SYNC SERVICE:
+
+/lib/integrations/ayrshare/analytics.ts:
+```typescript
+export async function fetchPostAnalytics(
+  ayrsharePostId: string
+): Promise<PostAnalytics> {
+  // Fetch from Ayrshare analytics endpoint
+  // Transform to our schema
+  // Return normalized data
+}
+
+export async function syncAllAnalytics(
+  teamId: string
+): Promise<SyncResult> {
+  // Get all published posts for team
+  // Fetch analytics for each from Ayrshare
+  // Upsert to analytics table
+  // Calculate derived metrics
+  // Return sync summary
+}
+
+export function calculateEngagementRate(
+  impressions: number,
+  likes: number,
+  comments: number,
+  shares: number
+): number {
+  if (impressions === 0) return 0
+  const engagement = likes + comments + shares
+  return (engagement / impressions) * 100
+}
+```
+
+5. BACKGROUND JOB:
+
+/lib/jobs/jobs/fetch-analytics.ts:
+```typescript
+export async function fetchAnalyticsJob(job: Job) {
+  const { scheduledPostId } = job.data
+  
+  // Get Ayrshare post IDs from scheduled_post.payload
+  // Fetch analytics for each platform
+  // Store in analytics table
+  // Calculate engagement metrics
+  // Update content.metadata with latest stats
+  
+  // Schedule next fetch (daily for first week, then weekly)
+  const nextFetch = job.attemptsMade < 7 ? '24h' : '7d'
+  await scheduleAnalyticsFetch(scheduledPostId, nextFetch)
+}
+```
+
+Cron job (runs daily):
+```typescript
+export async function dailyAnalyticsSyncJob() {
+  // Get all posts published in last 30 days
+  // Refresh analytics for each
+  // Aggregate team-level stats
+  // Store in analytics table
+}
+```
+
+6. UI COMPONENTS:
+
+/components/analytics/
+- analytics-overview.tsx (main dashboard)
+- metrics-card.tsx (KPI display with trend)
+- engagement-chart.tsx (Recharts line/bar)
+- platform-stats.tsx (platform comparison grid)
+- top-posts-table.tsx (sortable table)
+- date-range-picker.tsx (preset + custom ranges)
+- heatmap.tsx (best time to post)
+- export-button.tsx (CSV download)
+
+Chart Components (using Recharts):
+```typescript
+// Engagement over time
+<ResponsiveContainer>
+  <LineChart data={timeSeriesData}>
+    <XAxis dataKey="date" />
+    <YAxis />
+    <Tooltip />
+    <Legend />
+    <Line type="monotone" dataKey="impressions" stroke="#3b82f6" />
+    <Line type="monotone" dataKey="engagement" stroke="#10b981" />
+  </LineChart>
+</ResponsiveContainer>
+
+// Platform comparison
+<BarChart data={platformData}>
+  <XAxis dataKey="platform" />
+  <YAxis />
+  <Tooltip />
+  <Bar dataKey="engagement" fill="#8b5cf6" />
+</BarChart>
+```
+
+7. DATABASE QUERIES:
+
+/lib/db/queries/analytics.ts:
+```typescript
+export async function getAnalyticsSummary(
+  teamId: string,
+  from: Date,
+  to: Date,
+  platform?: string
+): Promise<AnalyticsSummary>
+
+export async function getTimeSeriesData(
+  teamId: string,
+  from: Date,
+  to: Date,
+  groupBy: 'day' | 'week' | 'month'
+): Promise<TimeSeriesPoint[]>
+
+export async function getTopPosts(
+  teamId: string,
+  from: Date,
+  to: Date,
+  limit: number = 5
+): Promise<TopPost[]>
+
+export async function getBestPostingTimes(
+  teamId: string
+): Promise<HeatmapData>
+```
+
+8. INSIGHTS ENGINE:
+
+/lib/analytics/insights.ts:
+```typescript
+export function generateInsights(
+  analytics: AnalyticsSummary,
+  historicalData: AnalyticsSummary[]
+): Insight[] {
+  const insights: Insight[] = []
+  
+  // Detect trends
+  if (analytics.engagementRate > historicalAverage * 1.2) {
+    insights.push({
+      type: 'positive',
+      title: 'Engagement is up 20%',
+      description: 'Your posts are resonating more than usual'
+    })
+  }
+  
+  // Identify best platform
+  const bestPlatform = Object.entries(analytics.platformBreakdown)
+    .sort((a, b) => b[1].engagementRate - a[1].engagementRate)[0]
+  
+  insights.push({
+    type: 'info',
+    title: `${bestPlatform[0]} is your top platform`,
+    description: `Consider posting more frequently here`
+  })
+  
+  // Suggest optimal posting times
+  // Recommend content types
+  // Flag underperforming posts
+  
+  return insights
+}
+```
+
+DELIVERABLES:
+1. Complete analytics dashboard with all charts
+2. Post-specific analytics detail view
+3. Ayrshare analytics sync service
+4. Background jobs for periodic refresh
+5. Database queries with aggregations
+6. Export functionality (CSV)
+7. Insights generation
+8. Responsive charts for mobile
+9. Loading states and error handling
+10. Type-safe analytics types
+
+Use Recharts for visualizations. Implement proper caching to avoid excessive API calls. Add tooltips explaining each metric.
